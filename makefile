@@ -37,7 +37,7 @@ install: $(RELOCATE_INDEX)
 	@printf '\033[1mTo complete installation, add the following to your shell config:\033[0m\n'
 	@echo
 	@echo 'export STOL_ROOT=/mnt/work # a location owned by your user'
-	@echo 'export STOL_PREFIX=ap      # optional branch prefix (ap/branchname)'
+	@echo 'export STOL_PREFIX=$(USER)  # optional branch prefix '
 	@echo 'export PATH="$$PATH:$(BINDIR)"'
 	@echo 'source $(DATADIR)/stol.bash # or .zsh / .fish'
 
