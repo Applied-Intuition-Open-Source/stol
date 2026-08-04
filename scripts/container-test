@@ -1,0 +1,82 @@
+#!/bin/bash
+
+# Copyright (C) 2026 Applied Intuition
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# Runs each subtest in an isolated STOL_ROOT
+#
+# Usage: container-test [subtest ...]   (default: all subtests)
+
+set -euo pipefail
+
+TEST_CASES_DIR="/pkg/scripts/test-cases"
+
+# --- environment, set up once ----------------------------------------------
+
+# stol on PATH
+export PATH="/pkg/src:$PATH"
+export STOL_PREFIX=test
+
+# git identity, for creating and importing repos
+git config --global user.email test@example.com
+git config --global user.name test
+
+# set up and mount an xfs filesystem
+mkdir -p /reflink
+STOL_ROOT=/reflink stol create-image --size 1G >/dev/null
+LOOP=$(losetup -f)
+mknod "$LOOP" b 7 "${LOOP##/dev/loop}" 2>/dev/null || true
+losetup "$LOOP" /reflink.img
+mount "$LOOP" /reflink
+trap 'umount /reflink 2>/dev/null || true; losetup -d "$LOOP" 2>/dev/null || true' EXIT
+
+cp -r /pkg /build
+
+# run the named subtests, or every subtest in TEST_CASES_DIR by default
+subtests=("$@")
+if [[ ${#subtests[@]} -eq 0 ]]; then
+  for script in "$TEST_CASES_DIR"/*; do
+    subtests+=("$(basename "$script")")
+  done
+fi
+
+failed=()
+for name in "${subtests[@]}"; do
+  script="$TEST_CASES_DIR/$name"
+  if [[ ! -f "$script" ]]; then
+    echo >&2 "unknown subtest: $name (have: $(cd "$TEST_CASES_DIR" && echo *))"
+    exit 1
+  fi
+
+  root="/reflink/$name"
+  rm -rf "$root"
+  mkdir -p "$root"
+
+  echo ""
+  echo "########## $name ##########"
+  if STOL_ROOT="$root" bash "$script"; then
+    :
+  else
+    failed+=("$name")
+  fi
+done
+
+echo ""
+if [[ ${#failed[@]} -eq 0 ]]; then
+  echo "All subtests passed."
+else
+  echo "Failed subtests: ${failed[*]}"
+  exit 1
+fi

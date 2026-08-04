@@ -1,0 +1,70 @@
+#!/bin/bash
+
+# Copyright (C) 2026 Applied Intuition
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+set -euo pipefail
+
+NAME=""
+
+show-help() {
+  echo >&2 "stol sync <project>"
+  echo >&2 ""
+  echo >&2 "Run git pull in each template worktree (00-*) of a project."
+}
+
+while [[ ${#} -gt 0 ]]
+do
+  opt="${1}"
+  shift
+
+  case "${opt}" in
+    -h | --help)
+      show-help
+      exit 0
+      ;;
+    *)
+      if [[ -n "$NAME" ]]
+      then
+        echo >&2 "Unexpected argument: ${opt}"
+        show-help
+        exit 1
+      fi
+      NAME="${opt}"
+      ;;
+  esac
+done
+
+if [[ -z "$NAME" ]]
+then
+  echo >&2 "Must provide a project name"
+  show-help
+  exit 1
+fi
+
+PROJECT_DIR="$STOL_ROOT/projects/$NAME"
+
+if [[ ! -d "$PROJECT_DIR" ]]
+then
+  echo >&2 "No such project: $NAME"
+  exit 1
+fi
+
+for dir in "$PROJECT_DIR"/00-*/
+do
+  [[ -d "$dir" ]] || continue
+  echo "pulling $(basename "$dir")"
+  git -C "$dir" pull --ff-only
+done

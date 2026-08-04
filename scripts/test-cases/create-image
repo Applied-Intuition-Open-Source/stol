@@ -1,0 +1,79 @@
+#!/bin/bash
+
+# Copyright (C) 2026 Applied Intuition
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# Tests stol create-image's failure modes.
+set -euo pipefail
+
+PASS=0
+FAIL=0
+
+ok() { PASS=$((PASS + 1)); echo "PASS: $1"; }
+fail() { FAIL=$((FAIL + 1)); echo "FAIL: $1"; }
+
+# -------------------------------------------------------------------
+# Test 1: mount point does not exist
+# -------------------------------------------------------------------
+missing="$STOL_ROOT/noexist"
+rm -rf "$missing" "$missing.img"
+output=$(STOL_ROOT="$missing" stol create-image 2>&1) \
+  && fail "should fail when mount point missing" || true
+if echo "$output" | grep -q "does not exist"; then
+  ok "fails with helpful message when mount point missing"
+else
+  fail "unhelpful error when mount point missing: $output"
+fi
+
+# -------------------------------------------------------------------
+# Test 2: mount point owned by a different user
+# -------------------------------------------------------------------
+badowner="$STOL_ROOT/badowner"
+rm -rf "$badowner" "$badowner.img"
+mkdir -p "$badowner" # owned by root
+# run as nobody (uid 65534), for whom the root-owned dir is not theirs
+output=$(su -s /bin/bash -c \
+  "export STOL_ROOT='$badowner' STOL_PREFIX=test PATH='$PATH'; stol create-image --size 512M 2>&1" \
+  nobody) && fail "should fail when wrong owner" || true
+if echo "$output" | grep -qi "not owned\|does not exist\|not found\|permission"; then
+  ok "fails when mount point has wrong owner"
+else
+  fail "unexpected output for wrong owner: $output"
+fi
+
+# -------------------------------------------------------------------
+# Test 3: image already exists
+# -------------------------------------------------------------------
+happy="$STOL_ROOT/happy"
+rm -rf "$happy" "$happy.img"
+mkdir -p "$happy"
+STOL_ROOT="$happy" stol create-image --size 512M >/dev/null 2>&1
+if [[ -f "$happy.img" ]]; then
+  ok "creates the image file"
+else
+  fail "image file not created"
+fi
+output=$(STOL_ROOT="$happy" stol create-image --size 512M 2>&1) \
+  && fail "should fail when image exists" || true
+if echo "$output" | grep -q "already exists"; then
+  ok "refuses to overwrite an existing image"
+else
+  fail "unhelpful error for existing image: $output"
+fi
+
+# -------------------------------------------------------------------
+echo ""
+echo "Results: $PASS passed, $FAIL failed"
+[[ $FAIL -eq 0 ]]

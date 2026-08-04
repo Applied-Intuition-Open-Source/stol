@@ -1,0 +1,90 @@
+#!/bin/bash
+
+# Copyright (C) 2026 Applied Intuition
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# Tests the stol format-drive argument and environment checks
+set -euo pipefail
+
+PASS=0
+FAIL=0
+
+ok() { PASS=$((PASS + 1)); echo "PASS: $1"; }
+fail() { FAIL=$((FAIL + 1)); echo "FAIL: $1"; }
+
+# A scratch loop device to point format-drive at.
+IMG=/tmp/format-drive-test.img
+truncate -s 64M "$IMG"
+LOOP=$(losetup -f)
+mknod "$LOOP" b 7 "${LOOP##/dev/loop}" 2>/dev/null || true
+losetup "$LOOP" "$IMG"
+trap 'losetup -d "$LOOP" 2>/dev/null || true' EXIT
+
+# -------------------------------------------------------------------
+# Test 1: missing device argument fails with a helpful message
+# -------------------------------------------------------------------
+output=$(stol format-drive 2>&1) && fail "should fail when no device given" || true
+if echo "$output" | grep -q "Must provide a device"; then
+  ok "fails with helpful message when no device given"
+else
+  fail "unhelpful error when no device given: $output"
+fi
+
+# -------------------------------------------------------------------
+# Test 2: a non-block-device argument is rejected
+# -------------------------------------------------------------------
+output=$(stol format-drive /etc/hostname 2>&1) && fail "should reject non-block device" || true
+if echo "$output" | grep -q "Not a block device"; then
+  ok "rejects a non-block device"
+else
+  fail "unhelpful error for non-block device: $output"
+fi
+
+# -------------------------------------------------------------------
+# Test 3: refuses to run without root, and suggests a working sudo invocation
+# -------------------------------------------------------------------
+output=$(setpriv --reuid 65534 --regid 65534 --clear-groups \
+           env "PATH=$PATH" stol format-drive "$LOOP" 2>&1) \
+  && fail "should fail when not root" || true
+if echo "$output" | grep -q "must be run as root"; then
+  ok "refuses to run without root"
+else
+  fail "unhelpful error when not root: $output"
+fi
+if echo "$output" | grep -q "sudo .*stol-format-drive"; then
+  ok "non-root error suggests a sudo invocation by full path"
+else
+  fail "non-root error does not suggest a sudo invocation: $output"
+fi
+
+# -------------------------------------------------------------------
+# Test 4: with all checks passing, declining the prompt aborts untouched
+# -------------------------------------------------------------------
+output=$(echo n | stol format-drive "$LOOP" 2>&1) && fail "declining prompt should exit nonzero" || true
+if echo "$output" | grep -q "Aborting."; then
+  ok "reaches the confirmation prompt and aborts on 'n'"
+else
+  fail "did not reach prompt / abort cleanly: $output"
+fi
+if cmp -s "$IMG" <(head -c "$(stat -c %s "$IMG")" /dev/zero); then
+  ok "device untouched after abort"
+else
+  fail "device was modified despite abort"
+fi
+
+# -------------------------------------------------------------------
+echo ""
+echo "Results: $PASS passed, $FAIL failed"
+[[ $FAIL -eq 0 ]]

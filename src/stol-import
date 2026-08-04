@@ -1,0 +1,127 @@
+#!/bin/bash
+
+# Copyright (C) 2026 Applied Intuition
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+set -euo pipefail
+
+URI=""
+NAME=""
+BRANCH=""
+
+show-help() {
+  echo >&2 "stol import <repo>"
+  echo >&2 "  <repo>                   # a repo to clone: a remote URL or a local path"
+  echo >&2 "  --name   <name>          # the name of this project. if not provided, inferred from the repo"
+  echo >&2 "  --branch <branch name>   # the starting point for new worktrees. if not provided, the repo's default branch"
+}
+
+while [[ ${#} -gt 0 ]]
+do
+  opt="${1}"
+  shift
+
+  case "${opt}" in
+    -h | --help)
+      show-help
+      exit 0
+      ;;
+    --name)
+      NAME="$1"
+      shift
+      ;;
+    --branch)
+      BRANCH="$1"
+      shift
+      ;;
+    -*)
+      echo >&2 "Unexpected argument: ${opt}"
+      show-help
+      exit 1
+      ;;
+    *)
+      if [[ -n "$URI" ]]
+      then
+        echo >&2 "Unexpected argument: ${opt}"
+        show-help
+        exit 1
+      fi
+      URI="${opt}"
+      ;;
+  esac
+done
+
+determine-repo-name() {
+  if [[ -z "$NAME" ]]
+  then
+    # strip a trailing .git, matching git clone's default directory naming
+    basename "${URI%.git}"
+  else
+    echo "$NAME"
+  fi
+}
+
+acquire-repo() {
+  git clone "$URI" "$1"
+}
+
+setup-project() {
+  local repo_name="$(determine-repo-name)"
+
+  if [[ -z "$repo_name" ]]
+  then
+    echo >&2 "BUG: repo name is empty"
+    exit 1
+  fi
+
+  local dst_proj_path="$STOL_ROOT/projects/$repo_name"
+  local repo_path="$dst_proj_path/.repo"
+
+  echo "Running one-time expensive setup"
+  set -x
+  mkdir -p "$dst_proj_path"
+
+  if ! acquire-repo "$repo_path"
+  then
+    set +x
+    # a failed clone cleans up after itself; remove the project dir too if
+    # it is left empty, so no phantom project shows up in stol ls
+    rmdir "$dst_proj_path" 2>/dev/null || true
+    echo >&2 "failed to clone $URI"
+    exit 1
+  fi
+
+  # default to the branch the clone checked out (the repo's default branch)
+  if [[ -z "$BRANCH" ]]
+  then
+    BRANCH="$(git -C "$repo_path" symbolic-ref --short HEAD)"
+  fi
+
+  git -C "$repo_path" switch --detach HEAD # no branch in the main repo
+  git -C "$repo_path" maintenance start || true # ok if this fails
+  git -C "$repo_path" worktree add "$dst_proj_path/00-${BRANCH//\//--}" "$BRANCH"
+  set +x
+
+  echo "stol dir: $dst_proj_path"
+}
+
+if [[ -z "$URI" ]]
+then
+  echo >&2 "Must provide a repo to clone"
+  show-help
+  exit 1
+fi
+
+setup-project

@@ -1,0 +1,151 @@
+#!/bin/bash
+
+# Copyright (C) 2026 Applied Intuition
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+set -euo pipefail
+
+show-help() {
+  echo >&2 "Print the path to a location within \$STOL_ROOT, optionally creating it."
+  echo >&2 "This command is an implementation detail of the 'scd' shell function."
+  echo >&2 "It is not meant to be called directly."
+  echo >&2 ""
+  echo >&2 "stol scd [<project>]"
+  echo >&2 "stol scd [<project>] -n [stol-new options] <name>"
+  echo >&2 "stol scd [<project>] -e <branch> [<name>]"
+  echo >&2 "stol scd <github-pr-url>"
+  echo >&2 "Print the path to the projects directory, or to a specific project."
+  echo >&2 ""
+  echo >&2 "With -n, create a new worktree via 'stol new' and print its path."
+  echo >&2 "With -e, check out an existing branch in a new worktree."
+  echo >&2 "With a GitHub PR URL, check out the PR branch in a new worktree."
+}
+
+MODE=""
+PROJECT=""
+NEW_ARGS=()
+
+while [[ ${#} -gt 0 ]]
+do
+  case "${1}" in
+    -h | --help)
+      show-help
+      exit 0
+      ;;
+    -n)
+      MODE=new
+      shift
+      NEW_ARGS=("$@")
+      break
+      ;;
+    -e)
+      MODE=existing
+      shift
+      NEW_ARGS=("--existing" "$@")
+      break
+      ;;
+    https://github.com/*/pull/*)
+      PR_URL="$1"
+      # extract repo name from URL: https://github.com/<owner>/<repo>/pull/<number>
+      REPO="$(echo "$PR_URL" | sed 's|.*/\([^/]*\)/pull/.*|\1|')"
+      BRANCH="$(gh pr view "$PR_URL" --json headRefName -q .headRefName)"
+      # try both <repo> and <repo>.git as project names
+      if [[ -d "$STOL_ROOT/projects/$REPO" ]]; then
+        PROJECT="$REPO"
+      elif [[ -d "$STOL_ROOT/projects/$REPO.git" ]]; then
+        PROJECT="$REPO.git"
+      else
+        PROJECT="$REPO"
+      fi
+      MODE=existing
+      NEW_ARGS=("--existing" "$BRANCH")
+      ;;
+    *)
+      if [[ -n "$PROJECT" ]]
+      then
+        echo >&2 "Unexpected argument: ${1}"
+        show-help
+        exit 1
+      fi
+      PROJECT="$1"
+      ;;
+  esac
+  shift
+done
+
+if [[ -n "$MODE" ]]
+then
+  # If project wasn't specified before the flag, check if the last arg is a project.
+  if [[ -z "$PROJECT" && ${#NEW_ARGS[@]} -gt 0 ]]
+  then
+    LAST="${NEW_ARGS[-1]}"
+    if [[ -d "$STOL_ROOT/projects/$LAST" ]]
+    then
+      PROJECT="$LAST"
+      unset 'NEW_ARGS[-1]'
+    fi
+  fi
+
+  # Infer project from current directory if not specified.
+  if [[ -z "$PROJECT" ]]
+  then
+    if [[ "$PWD" == "$STOL_ROOT/projects/"* ]]
+    then
+      rel="${PWD#"$STOL_ROOT/projects/"}"
+      PROJECT="${rel%%/*}"
+    fi
+  fi
+
+  PROJECT_DIR="$STOL_ROOT/projects/$PROJECT"
+  if [[ -z "$PROJECT" || ! -d "$PROJECT_DIR" ]]
+  then
+    echo >&2 "Must specify a valid project with -n/-e"
+    show-help
+    exit 1
+  fi
+
+  # For existing-branch modes, if the worktree already exists, just cd there.
+  if [[ "$MODE" == "existing" ]]
+  then
+    # Parse branch and optional name from NEW_ARGS (--existing <branch> [<name>])
+    _BRANCH="${NEW_ARGS[1]}"
+    _NAME="${NEW_ARGS[2]:-}"
+    _TREENAME="${_NAME:-${_BRANCH//\//--}}"
+    _TREEPATH="$PROJECT_DIR/$_TREENAME"
+    if [[ -d "$_TREEPATH" ]]
+    then
+      echo "$_TREEPATH"
+      exit 0
+    fi
+  fi
+
+  (cd "$PROJECT_DIR" && stol new "${NEW_ARGS[@]}")
+  exit 0
+fi
+
+if [[ -z "$PROJECT" ]]
+then
+  TARGET="$STOL_ROOT/projects"
+else
+  TARGET="$STOL_ROOT/projects/$PROJECT"
+fi
+
+if [[ ! -d "$TARGET" ]]
+then
+  echo >&2 "no such directory: $TARGET"
+  exit 1
+fi
+
+echo "$TARGET"

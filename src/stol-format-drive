@@ -1,0 +1,107 @@
+#!/bin/bash
+
+# Copyright (C) 2026 Applied Intuition
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+set -euo pipefail
+
+DISK=""
+
+show-help() {
+  echo >&2 "stol format-drive <device>"
+  echo >&2 ""
+  echo >&2 "  <device>          block device to format (e.g. /dev/sda, /dev/nvme0n1)"
+  echo >&2 ""
+  echo >&2 "Partitions and formats a drive for use with stol (XFS with reflink support)."
+  echo >&2 "WARNING: destroys all data on the device."
+}
+
+while [[ ${#} -gt 0 ]]
+do
+  opt="${1}"
+  shift
+
+  case "${opt}" in
+    -h | --help)
+      show-help
+      exit 0
+      ;;
+    *)
+      if [[ -n "$DISK" ]]
+      then
+        echo >&2 "Unexpected argument: ${opt}"
+        show-help
+        exit 1
+      fi
+      DISK="${opt}"
+      ;;
+  esac
+done
+
+if [[ -z "$DISK" ]]
+then
+  echo >&2 "Must provide a device"
+  show-help
+  exit 1
+fi
+
+if [[ ! -b "$DISK" ]]
+then
+  echo >&2 "Not a block device: $DISK"
+  exit 1
+fi
+
+if [[ $EUID -ne 0 ]]
+then
+  echo >&2 "stol format-drive must be run as root."
+  echo >&2 "Note: sudo resets PATH, so 'sudo stol format-drive' may not find stol."
+  echo >&2 "If so, invoke the subcommand by its full path:"
+  echo >&2 "  sudo $(command -v stol-format-drive || echo "$0") $DISK"
+  exit 1
+fi
+
+echo "Device: $DISK"
+lsblk "$DISK"
+echo ""
+echo "WARNING: This will destroy ALL DATA on $DISK"
+echo -n "Proceed? [y/N] "
+read -r CONFIRM
+
+if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]
+then
+  echo >&2 "Aborting."
+  exit 1
+fi
+
+# NVMe partitions use a 'p' separator (nvme0n1p1), others don't (sda1).
+if [[ "$DISK" =~ nvme ]]
+then
+  PART="${DISK}p1"
+else
+  PART="${DISK}1"
+fi
+
+set -x
+
+sgdisk -Z "$DISK"
+sgdisk -n 1:0:0 -t 1:8300 "$DISK"
+
+mkfs.xfs -f -m reflink=1 -d agcount=64 -i size=512 "$PART"
+
+set +x
+
+echo ""
+echo "Formatted $PART. UUID:"
+lsblk -o NAME,FSTYPE,UUID,LABEL "$PART"

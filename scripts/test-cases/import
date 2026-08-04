@@ -1,0 +1,117 @@
+#!/bin/bash
+
+# Copyright (C) 2026 Applied Intuition
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# Tests stol import and the wrapper's automatic creation of the projects
+# directory.
+set -euo pipefail
+
+PASS=0
+FAIL=0
+
+ok() { PASS=$((PASS + 1)); echo "PASS: $1"; }
+fail() { FAIL=$((FAIL + 1)); echo "FAIL: $1"; }
+
+# Create a throwaway git repo to import from.
+#   make_repo <path> <default-branch> [extra-branch]
+make_repo() {
+  local path="$1" branch="$2" extra="${3:-}"
+  git init -q -b "$branch" "$path"
+  git -C "$path" commit -q --allow-empty -m init
+  [[ -n "$extra" ]] && git -C "$path" branch "$extra"
+  return 0
+}
+
+# -------------------------------------------------------------------
+# Test 1: the wrapper creates the projects dir on a bare filesystem
+# -------------------------------------------------------------------
+rm -rf "$STOL_ROOT/projects"
+stol ls >/dev/null 2>&1 || true
+if [[ -d "$STOL_ROOT/projects" ]]; then
+  ok "wrapper creates projects dir if missing"
+else
+  fail "wrapper did not create projects dir"
+fi
+
+# -------------------------------------------------------------------
+# Test 2: missing repo argument fails with a helpful message
+# -------------------------------------------------------------------
+output=$(stol import 2>&1) && fail "should fail when no repo given" || true
+if echo "$output" | grep -q "Must provide a repo to clone"; then
+  ok "fails with helpful message when no repo given"
+else
+  fail "unhelpful error when no repo given: $output"
+fi
+
+# -------------------------------------------------------------------
+# Test 3: import a local path, name and branch inferred
+# -------------------------------------------------------------------
+make_repo /tmp/basic main
+stol import /tmp/basic >/dev/null 2>&1
+if [[ -d "$STOL_ROOT/projects/basic/.repo" && -d "$STOL_ROOT/projects/basic/00-main" ]]; then
+  ok "import infers name and default branch"
+else
+  fail "import did not create .repo and 00-main"
+fi
+
+# -------------------------------------------------------------------
+# Test 4: a trailing .git is stripped from the inferred name
+# -------------------------------------------------------------------
+make_repo /tmp/withsuffix.git main
+stol import /tmp/withsuffix.git >/dev/null 2>&1
+if [[ -d "$STOL_ROOT/projects/withsuffix" && ! -e "$STOL_ROOT/projects/withsuffix.git" ]]; then
+  ok "strips trailing .git from inferred name"
+else
+  fail "did not strip .git from inferred name"
+fi
+
+# -------------------------------------------------------------------
+# Test 5: the default branch is inferred, even when non-standard
+# -------------------------------------------------------------------
+make_repo /tmp/trunkrepo trunk
+stol import /tmp/trunkrepo >/dev/null 2>&1
+if [[ -d "$STOL_ROOT/projects/trunkrepo/00-trunk" ]]; then
+  ok "infers non-standard default branch"
+else
+  fail "did not infer non-standard default branch"
+fi
+
+# -------------------------------------------------------------------
+# Test 6: --branch overrides the inferred branch
+# -------------------------------------------------------------------
+make_repo /tmp/override main dev
+stol import /tmp/override --branch dev >/dev/null 2>&1
+if [[ -d "$STOL_ROOT/projects/override/00-dev" ]]; then
+  ok "--branch overrides the inferred branch"
+else
+  fail "--branch did not override the inferred branch"
+fi
+
+# -------------------------------------------------------------------
+# Test 7: --name overrides the inferred name
+# -------------------------------------------------------------------
+make_repo /tmp/somerepo main
+stol import /tmp/somerepo --name custom >/dev/null 2>&1
+if [[ -d "$STOL_ROOT/projects/custom/.repo" ]]; then
+  ok "--name overrides the inferred name"
+else
+  fail "--name did not override the inferred name"
+fi
+
+# -------------------------------------------------------------------
+echo ""
+echo "Results: $PASS passed, $FAIL failed"
+[[ $FAIL -eq 0 ]]

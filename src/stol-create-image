@@ -1,0 +1,102 @@
+#!/bin/bash
+
+# Copyright (C) 2026 Applied Intuition
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+set -euo pipefail
+
+SIZE="1T"
+
+show-help() {
+  echo >&2 "stol create-image [--size <size>]"
+  echo >&2 ""
+  echo >&2 "Creates a loopback XFS image for STOL_ROOT."
+  echo >&2 "Uses \$STOL_ROOT to determine the mount point."
+  echo >&2 ""
+  echo >&2 "Options:"
+  echo >&2 "  --size <size>  Image size (default: 1T)"
+}
+
+while [[ ${#} -gt 0 ]]
+do
+  opt="${1}"
+  shift
+
+  case "${opt}" in
+    -h | --help)
+      show-help
+      exit 0
+      ;;
+    --size)
+      SIZE="$1"
+      shift
+      ;;
+    *)
+      echo >&2 "Unexpected argument: ${opt}"
+      show-help
+      exit 1
+      ;;
+  esac
+done
+
+if ! command -v mkfs.xfs &>/dev/null
+then
+  echo >&2 "mkfs.xfs not found. Install xfsprogs first."
+  echo >&2 "  sudo apt install xfsprogs"
+  exit 1
+fi
+
+IMG="${STOL_ROOT}.img"
+MOUNT="$STOL_ROOT"
+
+if [[ -f "$IMG" ]]
+then
+  echo >&2 "Image already exists: $IMG"
+  exit 1
+fi
+
+if [[ ! -d "$MOUNT" ]]
+then
+  echo >&2 "$MOUNT does not exist. Run:"
+  echo >&2 "  sudo mkdir -p $MOUNT"
+  echo >&2 "  sudo chown $(id -u):$(id -g) $MOUNT"
+  exit 1
+fi
+
+if [[ "$(stat -c %u "$MOUNT")" != "$(id -u)" ]]
+then
+  echo >&2 "$MOUNT is not owned by you. Run:"
+  echo >&2 "  sudo chown $(id -u):$(id -g) $MOUNT"
+  exit 1
+fi
+
+set -x
+
+mkdir -p "$(dirname "$IMG")"
+truncate -s "$SIZE" "$IMG"
+# NOTE: some settings differ from stol-format-drive because this is not a physical disk
+mkfs.xfs -m reflink=1 "$IMG"
+
+set +x
+
+echo ""
+echo "Created $IMG ($SIZE)"
+echo ""
+echo "To mount and set ownership, run:"
+echo "  sudo mount -o loop $IMG $MOUNT"
+echo "  sudo chown $(id -u):$(id -g) $MOUNT"
+echo ""
+echo "To mount automatically, add this line to /etc/fstab:"
+echo "  $IMG $MOUNT xfs loop 0 0"

@@ -1,0 +1,195 @@
+#!/bin/bash
+
+# Copyright (C) 2026 Applied Intuition
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+set -euo pipefail
+
+EXISTING=""
+REMOTE="origin"
+NAME=""
+
+show-help() {
+  echo >&2 "stol new [--existing <branch>] [--remote <remote>] <name>"
+}
+
+while [[ ${#} -gt 0 ]]
+do
+  opt="${1}"
+  shift
+
+  case "${opt}" in
+    -h | --help)
+      show-help
+      exit 0
+      ;;
+    --existing)
+      EXISTING="$1"
+      shift
+      ;;
+    --remote)
+      REMOTE="$1"
+      shift
+      ;;
+    *)
+      if [[ -n "$NAME" ]]
+      then
+        echo >&2 "Unexpected argument: ${opt}"
+        show-help
+        exit 1
+      fi
+      NAME="${opt}"
+      ;;
+  esac
+done
+
+main() {
+  PREFIX="$STOL_PREFIX"
+
+  if [[ "$(dirname "$PWD")" != "$STOL_ROOT/projects" ]]
+  then
+    echo >&2 "cd into a project directory before running this command"
+    exit 1
+  fi
+
+  WTGITS="$PWD/.repo/.git/worktrees"
+
+  if [[ -n "$EXISTING" ]]
+  then
+    BRANCH="$EXISTING"
+    TREENAME="${NAME:-${EXISTING//\//--}}" # branch 'name/task' becomes 'name--task'
+  else
+    TREENAME="${NAME:-}"
+    if [[ -z "$TREENAME" ]]
+    then
+      echo >&2 "Must provide a name"
+      show-help
+      exit 1
+    fi
+    BRANCH="${PREFIX:+$PREFIX/}$TREENAME"
+  fi
+
+  # validate before creating anything, so a bad name can't leave a
+  # half-created worktree or an orphan branch behind
+  if [[ "$TREENAME" == */* || "$TREENAME" == -* || "$TREENAME" == .* ]]
+  then
+    echo >&2 "invalid worktree name: $TREENAME"
+    exit 1
+  fi
+
+  if ! git check-ref-format "refs/heads/$BRANCH"
+  then
+    echo >&2 "invalid branch name: $BRANCH"
+    exit 1
+  fi
+
+  TREEPATH="$PWD/$TREENAME"
+
+  if [[ -d "$TREEPATH" ]]
+  then
+    echo "tree $TREEPATH already exists"
+    exit 1
+  fi
+
+  if [[ -d "$WTGITS/$TREENAME" ]]
+  then
+    echo "worktree git directory $WTGITS/$TREENAME already exists"
+    echo "you may need a git worktree prune"
+    exit 1
+  fi
+
+  SOURCE_DIRS=()
+  for dir in 00-*/
+  do
+    [[ -d "$dir" ]] || continue
+    SOURCE_DIRS+=("${dir%/}")
+  done
+
+  if [[ ${#SOURCE_DIRS[@]} -eq 0 ]]
+  then
+    echo "No source worktree found. Have you run 'stol import'?"
+    exit 1
+  elif [[ ${#SOURCE_DIRS[@]} -eq 1 ]]
+  then
+    SOURCE_DIR="${SOURCE_DIRS[0]}"
+  else
+    SOURCE_DIR=""
+    PS3="Select a template worktree: "
+    select SOURCE_DIR in "${SOURCE_DIRS[@]}"
+    do
+      [[ -n "$SOURCE_DIR" ]] && break
+    done
+    if [[ -z "$SOURCE_DIR" ]]
+    then
+      echo >&2 "No template worktree selected"
+      exit 1
+    fi
+  fi
+
+  set -x
+
+  if [[ -n "$EXISTING" ]]
+  then
+    git -C "$SOURCE_DIR" fetch "$REMOTE" "$BRANCH" || true
+
+    # ensure the branch exists locally, creating a tracking branch if needed
+    if ! git -C "$SOURCE_DIR" show-ref --verify --quiet "refs/heads/$BRANCH"
+    then
+      git -C "$SOURCE_DIR" branch --track "$BRANCH" "$REMOTE/$BRANCH"
+    fi
+  else
+    git -C "$SOURCE_DIR" branch "$BRANCH"
+  fi
+
+  # copy from master to the new directory
+  cp -a --reflink=always "$SOURCE_DIR" "$TREEPATH"
+
+  # create a new git worktree dir
+  cp -a --reflink=always "$WTGITS/$SOURCE_DIR" "$WTGITS/$TREENAME"
+
+  # update the .git stub in the tree
+  echo "gitdir: $WTGITS/$TREENAME" > "$TREEPATH/.git"
+
+  # tell the new tree what branch it's looking at
+  echo "ref: refs/heads/$BRANCH" > "$WTGITS/$TREENAME/HEAD"
+
+  # and point back to the stub gitdir
+  echo "$TREEPATH/.git" > "$WTGITS/$TREENAME/gitdir"
+
+  # and finally, relocate the index. this is only an optimization: an
+  # unrelocated index is safe, git just repairs the stat info more slowly
+  if ! (cd "$TREEPATH" && stol-relocate-index "$WTGITS/$TREENAME/index")
+  then
+    echo >&2 'warning: stol-relocate-index failed; continuing without it'
+    echo >&2 'git will repair the index itself, so the first git status may be slow'
+  fi
+
+  if [[ -n "$EXISTING" ]]
+  then
+    git -C "$TREEPATH" reset --hard
+  fi
+
+  set +x
+  echo "worktree: $TREEPATH"
+
+  HOOK="$PWD/.stol/hooks/post-new"
+  if [[ -x "$HOOK" ]]
+  then
+    (cd "$TREEPATH" && "$HOOK")
+  fi
+}
+
+main >&2
+echo "$TREEPATH"

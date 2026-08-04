@@ -1,0 +1,136 @@
+#!/bin/bash
+
+# Copyright (C) 2026 Applied Intuition
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+set -euo pipefail
+
+# WTSPEC is the path provided by the user, which can take multiple path-like forms.
+# Usage described in show-help
+WTSPEC=""
+GIT_FLAGS=()
+
+show-help() {
+  echo >&2 "stol rm <worktree> [flags]"
+  echo >&2 "  stol rm .                    remove the current worktree"
+  echo >&2 "  stol rm <name>               remove worktree in the current project"
+  echo >&2 "  stol rm <project>/<name>     remove worktree in a specific project"
+  echo >&2 "additional flags are forwarded to git worktree remove, as in:"
+  echo >&2 "  stol rm . --force"
+}
+
+while [[ ${#} -gt 0 ]]
+do
+  opt="${1}"
+  shift
+
+  case "${opt}" in
+    -h | --help)
+      show-help
+      exit 0
+      ;;
+    -*)
+      GIT_FLAGS+=("${opt}")
+      ;;
+    *)
+      if [[ -n "$WTSPEC" ]]
+      then
+        echo >&2 "Unexpected argument: ${opt}"
+        show-help
+        exit 1
+      fi
+      WTSPEC="${opt}"
+      ;;
+  esac
+done
+
+main() {
+  if [[ -z "$WTSPEC" ]]
+  then
+    echo >&2 "Must provide a name"
+    show-help
+    exit 1
+  fi
+
+  if [[ "$WTSPEC" == "." ]]
+  then
+    # WTSPEC: .
+
+    # Must be inside a worktree, not just the project directory
+    if [[ "$(dirname "$(dirname "$PWD")")" != "$STOL_ROOT/projects" ]]
+    then
+      echo >&2 "'stol rm .' must be run from inside a worktree"
+      exit 1
+    fi
+    PROJECT_DIR="$(dirname "$PWD")"
+    WTNAME="$(basename "$PWD")"
+  elif [[ "$WTSPEC" == */* ]]
+  then
+    # WTSPECT: project/worktree
+    PROJECT_NAME="${WTSPEC%%/*}"
+    WTNAME="${WTSPEC#*/}"
+    PROJECT_DIR="$STOL_ROOT/projects/$PROJECT_NAME"
+
+    if [[ ! -d "$PROJECT_DIR" ]]
+    then
+      echo >&2 "project not found: $PROJECT_DIR"
+      exit 1
+    fi
+  else
+    # WTSPEC: worktree
+    if [[ "$(dirname "$PWD")" == "$STOL_ROOT/projects" ]]
+    then
+      PROJECT_DIR="$PWD"
+      WTNAME="$WTSPEC"
+    elif [[ "$(dirname "$(dirname "$PWD")")" == "$STOL_ROOT/projects" ]]
+    then
+      PROJECT_DIR="$(dirname "$PWD")"
+      WTNAME="$WTSPEC"
+    else
+      echo >&2 "cd into a project directory or worktree before running this command"
+      exit 1
+    fi
+  fi
+
+  WTPATH="$PROJECT_DIR/$WTNAME"
+
+  if [[ ! -d "$WTPATH" ]]
+  then
+    echo >&2 "worktree $WTPATH does not exist"
+    exit 1
+  fi
+
+  HOOK="$PROJECT_DIR/.stol/hooks/pre-remove"
+
+  # Run the hook while the worktree still exists so it can access its contents
+  if [[ -x "$HOOK" ]]
+  then
+    (cd "$WTPATH" && "$HOOK")
+  fi
+
+  if [[ "$WTPATH" == "$PWD" ]]
+  then
+    echo >&2 "warning: removing your current directory; cd elsewhere after this command"
+  fi
+
+  set -x
+
+  git -C "$WTPATH" worktree remove "${GIT_FLAGS[@]}" .
+
+  set +x
+  echo "removed: $WTPATH"
+}
+
+main >&2
