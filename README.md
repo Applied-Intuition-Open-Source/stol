@@ -192,18 +192,40 @@ scd https://github.com/Applied-Intuition-Open-Source/stol/pull/1
 
 ## Hooks
 
-You can add hooks to customize stol commands by placing executables in
-`.stol/hooks/` inside your project directory.
+`stol` runs two kinds of hooks, both executables at `.stol/hooks/post-new` and
+`.stol/hooks/pre-remove`, looked up in two places:
 
-```
-my-project/
-├── .stol/
-│   └── hooks/
-│       ├── post-new
-│       └── pre-remove
-├── .repo/
-└── 00-main/
-```
+- **Repo-tracked hooks**, committed to the repo itself, so they ship with the
+  code and go through normal review:
+
+  ```
+  my-project/                 (a git repository)
+  ├── .stol/
+  │   └── hooks/
+  │       ├── post-new
+  │       └── pre-remove
+  └── ...
+  ```
+
+  Because worktrees are reflinked copies of a template branch, whatever the
+  repo commits at this path is already present in every new worktree — no
+  installation step required.
+
+- **Project-level hooks**, host-specific and not tracked by git, for personal
+  or machine-specific customization:
+
+  ```
+  my-project.git/              (the stol project directory, under $STOL_ROOT)
+  ├── .stol/
+  │   └── hooks/
+  │       ├── post-new
+  │       └── pre-remove
+  ├── .repo/
+  └── 00-main/
+  ```
+
+If both exist, the repo-tracked hook runs first, then the project-level hook —
+so personal hooks can assume the repo's own baseline automation already ran.
 
 - **post-new**: runs after the worktree is created, inside the new worktree
   directory.

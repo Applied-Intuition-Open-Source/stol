@@ -112,12 +112,22 @@ main() {
     exit 1
   fi
 
-  HOOK="$PROJECT_DIR/.stol/hooks/pre-remove"
+  # Run hooks while the worktree still exists so they can access its contents.
 
-  # Run the hook while the worktree still exists so it can access its contents
-  if [[ -x "$HOOK" ]]
+  # Repo-tracked hook: shipped by the repo itself at .stol/hooks/pre-remove.
+  # Runs first, since it's the repo's own baseline automation.
+  REPO_HOOK="$WTPATH/.stol/hooks/pre-remove"
+  if [[ -x "$REPO_HOOK" ]]
   then
-    (cd "$WTPATH" && "$HOOK")
+    (cd "$WTPATH" && "$REPO_HOOK")
+  fi
+
+  # Project-level hook: host-specific, not tracked by git. Runs second, so
+  # it can assume the repo-tracked hook already ran.
+  PROJECT_HOOK="$PROJECT_DIR/.stol/hooks/pre-remove"
+  if [[ -x "$PROJECT_HOOK" ]]
+  then
+    (cd "$WTPATH" && "$PROJECT_HOOK")
   fi
 
   if [[ "$WTPATH" == "$PWD" ]]

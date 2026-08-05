@@ -184,10 +184,22 @@ main() {
   set +x
   echo "worktree: $TREEPATH"
 
-  HOOK="$PWD/.stol/hooks/post-new"
-  if [[ -x "$HOOK" ]]
+  # Repo-tracked hook: shipped by the repo itself at .stol/hooks/post-new, so
+  # it's present in every worktree via the reflinked copy. Runs first, since
+  # it's the repo's own baseline automation.
+  REPO_HOOK="$TREEPATH/.stol/hooks/post-new"
+  if [[ -x "$REPO_HOOK" ]]
   then
-    (cd "$TREEPATH" && "$HOOK")
+    (cd "$TREEPATH" && "$REPO_HOOK")
+  fi
+
+  # Project-level hook: host-specific, not tracked by git, lives alongside
+  # .repo/ and the template worktrees. Runs second, so it can assume the
+  # repo-tracked hook already ran.
+  PROJECT_HOOK="$PWD/.stol/hooks/post-new"
+  if [[ -x "$PROJECT_HOOK" ]]
+  then
+    (cd "$TREEPATH" && "$PROJECT_HOOK")
   fi
 }
 

@@ -1,0 +1,111 @@
+#!/bin/bash
+
+# Copyright (C) 2026 Applied Intuition
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# Tests repo-tracked and project-level post-new/pre-remove hooks, and their
+# run order relative to each other.
+set -euo pipefail
+
+PASS=0
+FAIL=0
+
+ok() { PASS=$((PASS + 1)); echo "PASS: $1"; }
+fail() { FAIL=$((FAIL + 1)); echo "FAIL: $1"; }
+
+LOG=/tmp/hooks.log
+rm -f "$LOG"
+
+# -------------------------------------------------------------------
+# Fixture: a repo that commits its own post-new/pre-remove hooks.
+# -------------------------------------------------------------------
+SRC=/tmp/hookrepo
+rm -rf "$SRC"
+git init -q -b main "$SRC"
+mkdir -p "$SRC/.stol/hooks"
+cat > "$SRC/.stol/hooks/post-new" <<EOF
+#!/bin/bash
+echo "repo post-new" >> $LOG
+EOF
+cat > "$SRC/.stol/hooks/pre-remove" <<EOF
+#!/bin/bash
+echo "repo pre-remove" >> $LOG
+EOF
+chmod +x "$SRC/.stol/hooks/post-new" "$SRC/.stol/hooks/pre-remove"
+git -C "$SRC" add .stol
+git -C "$SRC" commit -q -m init
+
+stol import "$SRC" >/dev/null 2>&1
+
+PROJECT_DIR="$STOL_ROOT/projects/hookrepo"
+cd "$PROJECT_DIR"
+
+# -------------------------------------------------------------------
+# Test 1: a repo-tracked post-new hook runs on 'stol new', with no
+# project-level hook installed.
+# -------------------------------------------------------------------
+WT=$(stol new t1 2>/dev/null | tail -1)
+if [[ "$(cat "$LOG" 2>/dev/null || true)" == "repo post-new" ]]; then
+  ok "repo-tracked post-new hook runs"
+else
+  fail "repo-tracked post-new hook did not run: $(cat "$LOG" 2>/dev/null || echo '<empty>')"
+fi
+
+# -------------------------------------------------------------------
+# Test 2: a repo-tracked pre-remove hook runs on 'stol rm'.
+# -------------------------------------------------------------------
+rm -f "$LOG"
+stol rm hookrepo/t1 --force >/dev/null 2>&1
+if [[ "$(cat "$LOG" 2>/dev/null || true)" == "repo pre-remove" ]]; then
+  ok "repo-tracked pre-remove hook runs"
+else
+  fail "repo-tracked pre-remove hook did not run: $(cat "$LOG" 2>/dev/null || echo '<empty>')"
+fi
+
+# -------------------------------------------------------------------
+# Test 3: with both a repo-tracked and a project-level hook installed,
+# the repo-tracked hook runs first, then the project-level hook.
+# -------------------------------------------------------------------
+rm -f "$LOG"
+mkdir -p "$PROJECT_DIR/.stol/hooks"
+cat > "$PROJECT_DIR/.stol/hooks/post-new" <<EOF
+#!/bin/bash
+echo "project post-new" >> $LOG
+EOF
+cat > "$PROJECT_DIR/.stol/hooks/pre-remove" <<EOF
+#!/bin/bash
+echo "project pre-remove" >> $LOG
+EOF
+chmod +x "$PROJECT_DIR/.stol/hooks/post-new" "$PROJECT_DIR/.stol/hooks/pre-remove"
+
+stol new t2 >/dev/null 2>&1
+if [[ "$(cat "$LOG")" == $'repo post-new\nproject post-new' ]]; then
+  ok "repo-tracked post-new hook runs before the project-level hook"
+else
+  fail "unexpected post-new hook order: $(cat "$LOG")"
+fi
+
+rm -f "$LOG"
+stol rm hookrepo/t2 --force >/dev/null 2>&1
+if [[ "$(cat "$LOG")" == $'repo pre-remove\nproject pre-remove' ]]; then
+  ok "repo-tracked pre-remove hook runs before the project-level hook"
+else
+  fail "unexpected pre-remove hook order: $(cat "$LOG")"
+fi
+
+# -------------------------------------------------------------------
+echo ""
+echo "Results: $PASS passed, $FAIL failed"
+[[ $FAIL -eq 0 ]]
