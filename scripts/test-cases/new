@@ -1,0 +1,228 @@
+#!/bin/bash
+
+# Copyright (C) 2026 Applied Intuition
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+set -euo pipefail
+
+PASS=0
+FAIL=0
+ok() { PASS=$((PASS + 1)); echo "PASS: $1"; }
+fail() { FAIL=$((FAIL + 1)); echo "FAIL: $1"; }
+check() {
+  local message="$1"
+  shift
+  if "$@"; then ok "$message"; else fail "$message"; fi
+}
+
+# Keep fixture identity and configuration independent of the invoking user.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export STOL_PREFIX=test
+mkdir -p "$STOL_ROOT/fixtures" "$STOL_ROOT/projects"
+REAL_CP=$(command -v cp)
+export REAL_CP
+mkdir "$STOL_ROOT/fixtures/bin"
+cat > "$STOL_ROOT/fixtures/bin/cp" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+args=("$@")
+for ((i = 0; i < ${#args[@]} - 1; i++)); do
+  source="${args[i]%/}"
+  [[ "$source" == -* ]] && continue
+  if [[ "${REJECT_TRANSIENT:-0}" == 1 && -d "$source" && ! -L "$source" ]]; then
+    case "$source" in
+      "$METADATA"|"$METADATA/lfs"|"$METADATA/lfs/tmp"|"$METADATA/lfs/tmp/"*|"$METADATA/lfs/incomplete"|"$METADATA/lfs/incomplete/"*)
+        echo >&2 "injected transient-copy failure: $source"
+        exit 73
+        ;;
+    esac
+  fi
+  if [[ -n "${FAIL_PATH:-}" ]]; then
+    case "$FAIL_PATH" in
+      "$source"|"$source/"*)
+        echo >&2 "injected persistent-copy failure: $FAIL_PATH"
+        exit 74
+        ;;
+    esac
+  fi
+done
+exec "$REAL_CP" "$@"
+EOF
+chmod +x "$STOL_ROOT/fixtures/bin/cp"
+
+make_fixture() {
+  local name="$1"
+  project="$STOL_ROOT/projects/$name"
+  evidence="$STOL_ROOT/fixtures/$name"
+  template="$project/00-master"
+  metadata="$project/.repo/.git/worktrees/00-master"
+  mkdir -p "$evidence" "$project/.stol/hooks"
+  git init -q -b master "$project/.repo"
+  printf 'tracked contents\n' > "$project/.repo/tracked"
+  git -C "$project/.repo" add tracked
+  git -C "$project/.repo" -c user.name=test -c user.email=test@example.com commit -qm init
+  git -C "$project/.repo" switch -q --detach
+  git -C "$project/.repo" worktree add -q "$template" master
+  printf 'hidden metadata\n' > "$metadata/.hidden"
+  printf 'metadata with spaces\n' > "$metadata/with spaces"
+  mkdir "$metadata/.hidden-dir"
+  printf 'nested metadata\n' > "$metadata/.hidden-dir/data"
+  ln -s 'with spaces' "$metadata/link"
+  ln -s missing "$metadata/dangling"
+  cat > "$project/.stol/hooks/post-new" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$PWD" "$(git symbolic-ref --short HEAD)" > "../hook-ran"
+EOF
+  chmod +x "$project/.stol/hooks/post-new"
+}
+
+snapshot_template() {
+  cp -a --reflink=always "$metadata" "$evidence/metadata-before"
+  cp -a --reflink=always "$template/.git" "$evidence/git-before"
+}
+
+check_template() {
+  check "$name: template metadata unchanged" diff -r --no-dereference "$evidence/metadata-before" "$metadata"
+  check "$name: template .git unchanged" cmp "$evidence/git-before" "$template/.git"
+}
+
+run_new() {
+  local name="$1" reject="${2:-0}" fail_path="${3:-}"
+  snapshot_template
+  status=0
+  (cd "$project" && PATH="$STOL_ROOT/fixtures/bin:$PATH" \
+    METADATA="$metadata" REJECT_TRANSIENT="$reject" FAIL_PATH="$fail_path" \
+    stol new "$name") > "$evidence/stdout" 2> "$evidence/stderr" || status=$?
+  check_template
+}
+
+check_worktree() {
+  local tree="$project/$name" dest="$project/.repo/.git/worktrees/$name"
+  check "$name: creation succeeds" test "$status" -eq 0
+  if [[ "$status" -ne 0 ]]; then
+    cat "$evidence/stderr"
+    return
+  fi
+  check "$name: stdout contains only the worktree path" test "$(< "$evidence/stdout")" = "$tree"
+  check "$name: .git points to new metadata" test "$(< "$tree/.git")" = "gitdir: $dest"
+  check "$name: metadata points back to new tree" test "$(< "$dest/gitdir")" = "$tree/.git"
+  check "$name: new branch is checked out" test "$(git -C "$tree" symbolic-ref --short HEAD)" = "test/$name"
+  check "$name: common Git directory is shared" test "$(git -C "$tree" rev-parse --path-format=absolute --git-common-dir)" = "$project/.repo/.git"
+  git -C "$project/.repo" worktree list --porcelain > "$evidence/worktrees"
+  check "$name: new tree is registered" grep -Fxq "worktree $tree" "$evidence/worktrees"
+  check "$name: tracked files are intact" cmp "$template/tracked" "$tree/tracked"
+  check "$name: worktree is clean" test -z "$(git -C "$tree" status --porcelain)"
+  check "$name: hidden metadata preserved" cmp "$metadata/.hidden" "$dest/.hidden"
+  check "$name: hidden metadata directory preserved" cmp "$metadata/.hidden-dir/data" "$dest/.hidden-dir/data"
+  check "$name: whitespace metadata preserved" cmp "$metadata/with spaces" "$dest/with spaces"
+  check "$name: metadata symlink preserved" test "$(readlink "$dest/link")" = 'with spaces'
+  check "$name: dangling metadata symlink preserved" test "$(readlink "$dest/dangling")" = missing
+  check "$name: hook runs in the isolated tree on its new branch" test "$(< "$project/hook-ran")" = "$(printf '%s\n' "$tree" "test/$name")"
+}
+
+name=plain
+make_fixture "$name"
+run_new "$name"
+check_worktree
+check "$name: no LFS directory is invented" test ! -e "$project/.repo/.git/worktrees/$name/lfs"
+
+name=lfs
+make_fixture "$name"
+mkdir -p "$metadata/lfs/objects/aa/bb" "$metadata/lfs/tmp" "$metadata/lfs/incomplete" \
+  "$metadata/lfs/custom/tmp" "$metadata/lfs/custom/incomplete"
+printf 'persistent LFS object\n' > "$metadata/lfs/objects/aa/bb/object"
+printf 'transient\n' > "$metadata/lfs/tmp/churning"
+printf 'transient\n' > "$metadata/lfs/incomplete/churning"
+printf 'keep nested tmp\n' > "$metadata/lfs/custom/tmp/data"
+printf 'keep nested incomplete\n' > "$metadata/lfs/custom/incomplete/data"
+printf 'hidden LFS state\n' > "$metadata/lfs/.state"
+ln -s objects "$metadata/lfs/linked-objects"
+run_new "$name" 1
+check_worktree
+if [[ "$status" -eq 0 ]]; then
+  dest="$project/.repo/.git/worktrees/$name/lfs"
+  check "$name: persistent objects and other LFS state preserved" diff -r --no-dereference --exclude=tmp --exclude=incomplete "$metadata/lfs" "$dest"
+  check "$name: nested tmp is not excluded" cmp "$metadata/lfs/custom/tmp/data" "$dest/custom/tmp/data"
+  check "$name: nested incomplete is not excluded" cmp "$metadata/lfs/custom/incomplete/data" "$dest/custom/incomplete/data"
+  check "$name: immediate tmp is excluded" test ! -e "$dest/tmp"
+  check "$name: immediate incomplete is excluded" test ! -e "$dest/incomplete"
+fi
+
+for name in lfs-link lfs-file transient-links; do
+  make_fixture "$name"
+  case "$name" in
+    lfs-link)
+      mkdir -p "$evidence/external-lfs/tmp"
+      printf 'external state\n' > "$evidence/external-lfs/tmp/keep"
+      ln -s "$evidence/external-lfs" "$metadata/lfs"
+      ;;
+    lfs-file) printf 'non-directory LFS metadata\n' > "$metadata/lfs" ;;
+    transient-links)
+      mkdir -p "$metadata/lfs/objects"
+      ln -s objects "$metadata/lfs/tmp"
+      ln -s missing "$metadata/lfs/incomplete"
+      ;;
+  esac
+  run_new "$name"
+  check_worktree
+  if [[ "$status" -eq 0 ]]; then
+    dest="$project/.repo/.git/worktrees/$name/lfs"
+    case "$name" in
+      lfs-link)
+        check "$name: LFS symlink is not traversed" test "$(readlink "$dest")" = "$evidence/external-lfs"
+        ;;
+      lfs-file) check "$name: LFS regular file preserved" cmp "$metadata/lfs" "$dest" ;;
+      transient-links)
+        check "$name: transient symlinks are excluded" test ! -L "$dest/tmp"
+        check "$name: dangling transient symlinks are excluded" test ! -L "$dest/incomplete"
+        ;;
+    esac
+  fi
+done
+
+for name in fail-index fail-object; do
+  make_fixture "$name"
+  mkdir -p "$metadata/lfs/objects"
+  printf 'persistent object\n' > "$metadata/lfs/objects/object"
+  if [[ "$name" == fail-index ]]; then
+    fail_path="$metadata/index"
+  else
+    fail_path="$metadata/lfs/objects/object"
+  fi
+  run_new "$name" 0 "$fail_path"
+  check "$name: persistent copy error propagates" test "$status" -eq 74
+  check "$name: copy failure is reported" grep -q 'injected persistent-copy failure:' "$evidence/stderr"
+  check "$name: no success path is printed" test ! -s "$evidence/stdout"
+  if grep -q '^worktree: ' "$evidence/stderr"; then fail "$name: success message printed"; else ok "$name: no success message printed"; fi
+  check "$name: post-new hook does not run" test ! -e "$project/hook-ran"
+  check "$name: failed copy cannot alias template metadata" test ! -e "$project/$name/.git"
+done
+
+name=missing-metadata
+make_fixture "$name"
+mv "$metadata" "$evidence/saved-metadata"
+status=0
+(cd "$project" && stol new "$name") > "$evidence/stdout" 2> "$evidence/stderr" || status=$?
+check "$name: missing source metadata fails" test "$status" -ne 0
+check "$name: reports missing source" grep -q 'cannot read template worktree metadata:' "$evidence/stderr"
+check "$name: no worktree is copied" test ! -e "$project/$name"
+check "$name: no success path is printed" test ! -s "$evidence/stdout"
+check "$name: hook does not run" test ! -e "$project/hook-ran"
+mv "$evidence/saved-metadata" "$metadata"
+
+echo ""
+echo "Results: $PASS passed, $FAIL failed"
+[[ $FAIL -eq 0 ]]
