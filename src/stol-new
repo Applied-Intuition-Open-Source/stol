@@ -138,6 +138,12 @@ main() {
     fi
   fi
 
+  if [[ ! -d "$WTGITS/$SOURCE_DIR" || ! -r "$WTGITS/$SOURCE_DIR" || ! -x "$WTGITS/$SOURCE_DIR" ]]
+  then
+    echo >&2 "cannot read template worktree metadata: $WTGITS/$SOURCE_DIR"
+    exit 1
+  fi
+
   set -x
 
   if [[ -n "$EXISTING" ]]
@@ -156,8 +162,27 @@ main() {
   # copy from master to the new directory
   cp -a --reflink=always "$SOURCE_DIR" "$TREEPATH"
 
-  # create a new git worktree dir
-  cp -a --reflink=always "$WTGITS/$SOURCE_DIR" "$WTGITS/$TREENAME"
+  # LFS staging files can disappear mid-copy; copy only its persistent state.
+  (
+    shopt -s dotglob nullglob
+    mkdir "$WTGITS/$TREENAME"
+    for entry in "$WTGITS/$SOURCE_DIR"/*
+    do
+      if [[ "${entry##*/}" == lfs && -d "$entry" && ! -L "$entry" ]]
+      then
+        mkdir "$WTGITS/$TREENAME/lfs"
+        for lfs_entry in "$entry"/*
+        do
+          case "${lfs_entry##*/}" in
+            tmp | incomplete) continue ;;
+          esac
+          cp -a --reflink=always -- "$lfs_entry" "$WTGITS/$TREENAME/lfs/"
+        done
+      else
+        cp -a --reflink=always -- "$entry" "$WTGITS/$TREENAME/"
+      fi
+    done
+  )
 
   # update the .git stub in the tree
   echo "gitdir: $WTGITS/$TREENAME" > "$TREEPATH/.git"
