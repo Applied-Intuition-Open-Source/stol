@@ -208,7 +208,7 @@ for name in fail-index fail-object; do
   check "$name: no success path is printed" test ! -s "$evidence/stdout"
   if grep -q '^worktree: ' "$evidence/stderr"; then fail "$name: success message printed"; else ok "$name: no success message printed"; fi
   check "$name: post-new hook does not run" test ! -e "$project/hook-ran"
-  check "$name: linkage is not rewritten after failed copy" cmp "$template/.git" "$project/$name/.git"
+  check "$name: failed copy cannot alias template metadata" test ! -e "$project/$name/.git"
 done
 
 name=missing-metadata

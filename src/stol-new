@@ -161,6 +161,8 @@ main() {
 
   # copy from master to the new directory
   cp -a --reflink=always "$SOURCE_DIR" "$TREEPATH"
+  # A failed metadata copy must not leave a pointer to the template.
+  rm -- "$TREEPATH/.git"
 
   # LFS staging files can disappear mid-copy; copy only its persistent state.
   (
